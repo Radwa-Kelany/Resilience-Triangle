@@ -1,96 +1,79 @@
-# Circuit-breaker
+# The Resilience Triangle
 
-## Definition and Purpose
+Three patterns that keep an application working when things go wrong: **Circuit Breaker**, **Rate Limiter** and **Retry**.
 
-### What it is
+![The Resilience Triangle](resilience-triangle-all-sides.png)
 
-A circuit breaker protects your system from calling a service that is failing. Think of a guard on a road: if there is an accident ahead, the guard stops traffic until the road is safe again.
+---
 
-### How it works
+## Why resilience matters
 
-* While the other service is healthy, the breaker stays out of the way and all requests pass through. In this state, the breaker is called **Closed**.
-* When the service becomes unhealthy, the breaker steps in and blocks requests for a while, so callers get an immediate failure instead of waiting. In this state, the breaker is called **Open**.
+Modern applications rarely work alone. A single user action can call a database, a payment service, a search API and several third-party providers. Every one of those calls can fail: a server crashes, a network drops, a deployment goes wrong, or a provider simply gets too much traffic.
 
-### Purpose
+Nobody can build a system that never fails. What you can build is a system that **contains** failures, so a small problem stays small.
 
-* Fail fast instead of waiting for timeouts
-* Stop one failure from spreading to other services
-* Give the failing service time to recover
-* Save resources like threads and connections
+Without that protection, one slow dependency can bring everything down:
 
-## Half-Open State and Probing
+1. A service becomes slow.
+2. Callers keep waiting for it, and their threads and connections pile up.
+3. The callers run out of resources and become slow themselves.
+4. Their callers start waiting too, and the failure spreads through the whole system.
 
-### Cooldown period
+This is called a **cascading failure**. Well-meant reactions can make it worse: if every client retries at once, a struggling service gets even more traffic. The result is downtime, lost revenue and lost trust, often caused by a failure that started in a minor part of the system.
 
-The "while" the breaker stays Open is called the **cooldown period**.
+**Resilience** is the ability to keep working, or to degrade gracefully, when parts of the system fail, and to recover quickly afterwards.
 
-### Probing
+---
 
-When the cooldown ends, the breaker does not send all traffic back at once. It first checks whether the service has recovered, like a guard who lets one car through to test the road before reopening it. This check is called a **probe**.
+## The main idea: the Resilience Triangle
 
-To probe, the breaker lets a single request (or a small number) through and keeps blocking the rest. In this state, the breaker is called **Half-Open**.
+Three simple patterns cover most of this problem. Each one is one side of the triangle and answers one question.
 
-* If the probe **succeeds**, the service has recovered. The breaker returns to **Closed** and normal traffic resumes.
-* If the probe **fails**, the service is still broken. The breaker returns to **Open** and blocks requests for another cooldown period.
+| Side                | The question it answers                          | Status      |
+| ------------------- | ------------------------------------------------ | ----------- |
+| **Circuit Breaker** | Should I stop calling a service that is failing? | Done        |
+| **Rate Limiter**    | How much traffic should I let through?           | Done        |
+| **Retry**           | Should I try again, and how?                     | Done        |
 
-This cycle repeats until a probe succeeds.
+**Road analogy:**
 
-## How the Breaker Detects Failure
+- The **circuit breaker** is a guard who closes the road when there is an accident ahead, so nobody waits in a jam.
+- The **rate limiter** is a guard at the entrance who only lets in a fixed number of cars, so the road never gets jammed in the first place.
+- **Retry** is a driver who tries again after a short wait, but never drives into a road that the guard has closed.
 
-### Counting failures
+**How they work together:**
 
-In the **Closed** state, requests pass through and the breaker watches every response. Each **service** failure increases a **failure counter**. The breaker keeps comparing this counter with a configured **failure threshold**.
+```
+Request  →  Rate Limiter  →  Circuit Breaker  →  Service
+              (how much?)      (is it healthy?)
+                                     ↑
+                      Retry (only when the failure is temporary,
+                             and never while the breaker is open)
+```
 
-#### Which failures are counted
+Each side covers a weakness of the others. The rate limiter keeps traffic under control, the circuit breaker stops calls to a service that is already failing, and retry recovers from short, temporary failures without making an overload worse.
 
-A failed response does not always mean the service is unhealthy. The breaker must decide whether the failure was caused by the service or by something on the caller's side. Only service failures increase the failure counter.
+---
 
-**Counted failures (service side)**
+## Side 1: Circuit Breaker
 
-* HTTP 5xx responses
-* Connection errors
-* Timeouts
+**The problem:** calling a service that is failing makes every caller wait for a timeout, and the waiting spreads the failure.
 
-**Ignored failures (caller side)**
+**The idea:** the breaker watches the calls and, when the service looks unhealthy, stops sending requests to it. Callers get an immediate failure instead of waiting. This is called failing fast.
 
-* Client mistakes, such as HTTP 400 or 404
-* Requests cancelled by our own side
+**The three states:**
 
-When a failed response returns, the breaker checks its cause:
+- **Closed:** requests pass through, and service failures are counted.
+- **Open:** when the failure threshold is reached, requests are blocked immediately for a cooldown period.
+- **Half-Open:** after the cooldown, one **probe** request tests the service. If it succeeds, the breaker closes. If it fails, the breaker opens again for another cooldown.
 
-* If the cause is the **service**, the failure is counted.
-* If the cause is the **caller**, the breaker ignores it. The counter does not change, and no decision is taken.
+**Two details that matter:**
 
-This keeps the breaker from tripping because of caller mistakes while the service itself is healthy.
+- Only **service failures** count (HTTP 5xx, timeouts, connection errors). Caller mistakes such as 400 or 404 are ignored, so a client error never trips the breaker.
+- While the probe is on its way, a **probe flag** rejects every other request. Without it, traffic would flood a service that is still recovering.
 
-### Tripping
+![Circuit breaker diagram](circuit-breaker/circuit-breaker-diagram.gif)
 
-When the counter reaches or exceeds the threshold, the breaker concludes that the service is unhealthy. It trips to the **Open** state and starts the cooldown period.
+**More details:** [reference notes](circuit-breaker/circuit-breaker.md) · [TypeScript](circuit-breaker/circuit-breaker.ts) · [flowchart](circuit-breaker/circuit-breaker-flow-preview.png)
 
-### While Open
-
-Every request that arrives during the cooldown period is blocked immediately, and the breaker stays Open until the cooldown expires.
-
-### Recovery
-
-When the cooldown expires, the breaker moves to **Half-Open** and sends a probe, as described in the previous section.
-
-If the probe succeeds, the failure counter is reset. This prevents old failures from piling up and wrongly blocking future requests.
-
-## The Probe Flag
-
-### The problem
-
-When the breaker moves to **Half-Open**, it lets one probe request through. While that probe is still on its way and has not returned, other requests arrive and see that the road is open. They could pass too, which defeats the purpose of testing the service with a single request.
-
-### The solution: a probe flag
-
-The breaker puts up a sign saying "probing in progress". This sign is a boolean flag called `halfOpenProbe`.
-
-* When the probe is sent, the breaker sets `halfOpenProbe = true`.
-* While the flag is `true`, every other incoming request is rejected immediately. Callers get a quick failure instead of waiting, which keeps the "fail fast" purpose and saves threads and connections.
-* When the probe returns, with success or failure, the breaker sets `halfOpenProbe = false` and decides based on the result: success returns the breaker to **Closed**, and failure returns it to **Open** for another cooldown period.
-
-### Scope of the flag
-
-The flag is used only in the **Half-Open** state. In **Closed** and **Open** it plays no role, because Closed lets everything through and Open already blocks everything.
+---
