@@ -77,3 +77,33 @@ Each side covers a weakness of the others. The rate limiter keeps traffic under 
 **More details:** [reference notes](circuit-breaker/circuit-breaker.md) · [TypeScript](circuit-breaker/circuit-breaker.ts) · [flowchart](circuit-breaker/circuit-breaker-flow-preview.png)
 
 ---
+
+
+## Side 2: Rate Limiter
+
+**The problem:** too much traffic, from one client or from everyone, can overload a service. This also happens by accident, for example with a buggy loop.
+
+**The idea:** a rate limiter decides, for every request, whether there is allowance left. If there is, the request passes. If not, it is rejected immediately with **HTTP 429 (Too Many Requests)**, without doing the real work. It works with two things:
+
+- **Count:** how much allowance is left.
+- **Time:** what restores the allowance.
+
+**The algorithms** differ in how they count and how time restores the allowance: fixed window, sliding window, token bucket and leaky bucket. This series focuses on the **token bucket**, which allows short bursts but still enforces the average rate.
+
+**How the token bucket works:**
+
+- The bucket holds tokens, and each request takes one. If the bucket is empty, the request is rejected.
+- **Capacity** is the largest burst allowed, and the **refill rate** is the average rate allowed over time.
+- Refill is **lazy**: there is no timer. On each request, the limiter calculates the tokens earned since the last request and adds them, capped at capacity:
+
+```
+tokens = min(capacity, tokens + elapsed × refillRate)
+```
+
+- The code keeps **one bucket per provider** (`providerName`), so one provider running out of tokens does not block the others.
+
+![Token bucket rate limiter diagram](rate-limiter/rate-limiter-diagram.gif)
+
+**More details:** [reference notes](rate-limiter/rate-limiter.md) · [TypeScript](rate-limiter/rate-limiter.ts) · [flowchart](rate-limiter/rate-limiter-flow-preview.png)
+
+---
